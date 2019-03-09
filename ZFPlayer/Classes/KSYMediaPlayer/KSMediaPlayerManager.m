@@ -23,12 +23,8 @@
 // THE SOFTWARE.
 
 #import "KSMediaPlayerManager.h"
-#import "ZFPlayerView.h"
-#if __has_include(<ZFPlayer/ZFPlayer.h>)
+#import <ZFPlayer/ZFPlayerView.h>
 #import <ZFPlayer/ZFPlayer.h>
-#else
-#import "ZFPlayer.h"
-#endif
 
 #if __has_include(<KSYMediaPlayer/KSYMediaPlayer.h>)
 #import <KSYMediaPlayer/KSYMediaPlayer.h>
@@ -39,6 +35,7 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
     ZFKVOController *_playerItemKVO;
 }
 @property (nonatomic, strong) KSYMoviePlayerController *player;
+@property (nonatomic, assign) BOOL isReadyToPlay;
 
 @end
 
@@ -55,8 +52,9 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 @synthesize loadState                      = _loadState;
 @synthesize assetURL                       = _assetURL;
 @synthesize playerPrepareToPlay            = _playerPrepareToPlay;
-@synthesize playerPlayStatChanged          = _playerPlayStatChanged;
-@synthesize playerLoadStatChanged          = _playerLoadStatChanged;
+@synthesize playerReadyToPlay              = _playerReadyToPlay;
+@synthesize playerPlayStateChanged         = _playerPlayStateChanged;
+@synthesize playerLoadStateChanged         = _playerLoadStateChanged;
 @synthesize seekTime                       = _seekTime;
 @synthesize muted                          = _muted;
 @synthesize volume                         = _volume;
@@ -65,6 +63,8 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 @synthesize rate                           = _rate;
 @synthesize isPreparedToPlay               = _isPreparedToPlay;
 @synthesize scalingMode                    = _scalingMode;
+@synthesize playerPlayFailed               = _playerPlayFailed;
+@synthesize presentationSizeChanged        = _presentationSizeChanged;
 
 - (void)dealloc {
     [self destory];
@@ -91,7 +91,7 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
     self.loadState = ZFPlayerLoadStatePrepare;
     [self initializePlayer];
     if (self.playerPrepareToPlay) self.playerPrepareToPlay(self, self.assetURL);
-    [self.player prepareToPlay];
+    [self play];
 }
 
 - (void)play {
@@ -117,13 +117,17 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
     [self.player.view removeFromSuperview];
     [self destory];
     self.player = nil;
+    self->_currentTime = 0;
+    self->_totalTime = 0;
+    self->_bufferTime = 0;
+    self.isReadyToPlay = NO;
 }
 
 - (void)replay {
-    __weak typeof(self) weakSelf = self;
+    @weakify(self)
     [self seekToTime:0 completionHandler:^(BOOL finished) {
-        __strong typeof(weakSelf) strongSelf = self;
-        [strongSelf play];
+        @strongify(self)
+        [self play];
     }];
 }
 
@@ -150,16 +154,13 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 
 - (void)initializePlayer {
     self.player = [[KSYMoviePlayerController alloc] initWithContentURL:_assetURL];
+    [self.player prepareToPlay];
     self.player.shouldAutoplay = YES;
     [self addPlayerNotification];
-
-    UIView *playerBgView = [UIView new];
-    [self.view insertSubview:playerBgView atIndex:0];
-    playerBgView.frame = self.view.bounds;
-    playerBgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     
-    [playerBgView addSubview:self.player.view];
-    self.player.view.frame = playerBgView.bounds;
+    [self.view insertSubview:self.player.view atIndex:2];
+    self.player.view.backgroundColor = [UIColor clearColor];
+    self.player.view.frame = self.view.bounds;
     self.player.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.scalingMode = _scalingMode;
     self.player.controlStyle = MPMovieControlStyleNone;
@@ -225,7 +226,11 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([keyPath isEqualToString:kCurrentPlaybackTime]) {
-            self->_currentTime = self.player.currentPlaybackTime;
+            if (self.player.currentPlaybackTime > 0 && !self.isReadyToPlay) {
+                self.isReadyToPlay = YES;
+                self.loadState = ZFPlayerLoadStatePlaythroughOK;
+            }
+            self->_currentTime = self.player.currentPlaybackTime > 0 ? self.player.currentPlaybackTime : 0;
             self->_totalTime = self.player.duration;
             self->_bufferTime = self.player.playableDuration;
             if (self.playerPlayTimeChanged) self.playerPlayTimeChanged(self, self->_currentTime, self->_totalTime);
@@ -244,21 +249,21 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
         self.seekTime = 0; // 滞空, 防止下次播放出错
     }
     [self play];
-    /// 需要延迟改为ok状态，不然显示会有一点问题。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.loadState = ZFPlayerLoadStatePlaythroughOK;
-    });
+    self.player.shouldMute = self.muted;
+    if (self.playerPrepareToPlay) self.playerReadyToPlay(self, self.assetURL);
 }
 
 /// 播放完成通知。视频正常播放完成时触发。
 - (void)videoFinish:(NSNotification *)notify {
-    NSInteger reason = [[[notify userInfo] valueForKey:MPMoviePlayerPlaybackDidFinishReasonUserInfoKey] integerValue];
+    NSInteger reason = [[notify.userInfo valueForKey:MPMoviePlayerPlaybackDidFinishReasonUserInfoKey] integerValue];
     if (reason == MPMovieFinishReasonPlaybackEnded) {
         self.playState = ZFPlayerPlayStatePlayStopped;
         if (self.playerDidToEnd) self.playerDidToEnd(self);
     } else if (reason == MPMovieFinishReasonPlaybackError) {
-        NSLog(@"%@", [NSString stringWithFormat:@"player Error : %@", [[notify userInfo] valueForKey:@"error"]]);
         self.playState = ZFPlayerPlayStatePlayFailed;
+        NSString *error = [notify.userInfo valueForKey:@"error"];
+        ZFPlayerLog(@"player Error : %@", error);
+        if (self.playerPlayFailed) self.playerPlayFailed(self, error);
     } else if (reason == MPMovieFinishReasonUserExited){
         /// player userExited
     }
@@ -271,13 +276,15 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 
 /// 视频的尺寸变化了
 - (void)sizeAvailableChange:(NSNotification *)notify {
-    // 如果想要在宽大于高的时候横屏播放，你可以在这里旋转
+    self->_presentationSize = self.player.naturalSize;
+    if (self.presentationSizeChanged) {
+        self.presentationSizeChanged(self, self->_presentationSize);
+    }
 }
 
 - (void)bufferChange:(NSNotification *)notify {
     if (self.player.loadState == MPMovieLoadStateStalled) { /// 播放器开始缓冲视频时发送该通知
-        NSLog(@"player start caching");
-        //    } else if (self.player.loadState == MPMovieLoadStatePlayable || self.player.loadState == MPMovieLoadStatePlaythroughOK) { /// 播放器结束缓冲视频时发送该通知
+        ZFPlayerLog(@"player start caching");
         self.loadState = ZFPlayerLoadStateStalled;
     } else {
         self.loadState = ZFPlayerLoadStatePlayable;
@@ -286,27 +293,27 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 
 /// 播放器首帧出现
 - (void)videoFirstFrame:(NSNotification *)notify {
-    
+
 }
 
 /// 播放状态改变
 - (void)playbackStateDidChange:(NSNotification *)notify {
-    NSLog(@"player playback state: %ld", (long)self.player.playbackState);
+    ZFPlayerLog(@"player playback state: %ld", (long)self.player.playbackState);
 }
 
 /// 播放解码状态
 - (void)playbackStatusChange:(NSNotification *)notify {
     int status = [[[notify userInfo] valueForKey:MPMoviePlayerPlaybackStatusUserInfoKey] intValue];
     if (MPMovieStatusVideoDecodeWrong == status) {
-        NSLog(@"Video Decode Wrong!\n");
+        ZFPlayerLog(@"Video Decode Wrong!\n");
     } else if(MPMovieStatusAudioDecodeWrong == status) {
-        NSLog(@"Audio Decode Wrong!\n");
+        ZFPlayerLog(@"Audio Decode Wrong!\n");
     } else if (MPMovieStatusHWCodecUsed == status ) {
-        NSLog(@"Hardware Codec used\n");
+        ZFPlayerLog(@"Hardware Codec used\n");
     } else if (MPMovieStatusSWCodecUsed == status ) {
-        NSLog(@"Software Codec used\n");
+        ZFPlayerLog(@"Software Codec used\n");
     } else if(MPMovieStatusDLCodecUsed == status) {
-        NSLog(@"AVSampleBufferDisplayLayer  Codec used");
+        ZFPlayerLog(@"AVSampleBufferDisplayLayer  Codec used");
     }
 }
 
@@ -331,12 +338,12 @@ static NSString *const kCurrentPlaybackTime = @"currentPlaybackTime";
 
 - (void)setPlayState:(ZFPlayerPlaybackState)playState {
     _playState = playState;
-    if (self.playerPlayStatChanged) self.playerPlayStatChanged(self, playState);
+    if (self.playerPlayStateChanged) self.playerPlayStateChanged(self, playState);
 }
 
 - (void)setLoadState:(ZFPlayerLoadState)loadState {
     _loadState = loadState;
-    if (self.playerLoadStatChanged) self.playerLoadStatChanged(self, loadState);
+    if (self.playerLoadStateChanged) self.playerLoadStateChanged(self, loadState);
 }
 
 - (void)setAssetURL:(NSURL *)assetURL {

@@ -1,5 +1,6 @@
 //
-//  UIViewController+ZFPlayerRotation.h
+//  ZFPlayerLogManager.m
+//  ZFPlayer
 //
 // Copyright (c) 2016年 任子丰 ( http://github.com/renzifeng )
 //
@@ -21,12 +22,29 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#import <UIKit/UIKit.h>
+#import "ZFPlayerLogManager.h"
 
-@interface UITabBarController (ZFPlayerRotation)
+// 默认值为NO
+static BOOL kLogEnable = NO;
 
-@end
+@implementation ZFPlayerLogManager
 
-@interface UINavigationController (ZFPlayerRotation)
++ (void)setLogEnable:(BOOL)enable {
+    kLogEnable = enable;
+}
+
++ (BOOL)getLogEnable {
+    return kLogEnable;
+}
+
++ (NSString *)version {
+    return @"3.2.6";
+}
+
++ (void)logWithFunction:(const char *)function lineNumber:(int)lineNumber formatString:(NSString *)formatString {
+    if ([self getLogEnable]) {
+        NSLog(@"%s[%d]%@", function, lineNumber, formatString);
+    }
+}
 
 @end
